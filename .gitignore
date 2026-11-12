@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/deploy/certs/
+*.test
+*.out
+coverage.*
+.DS_Store
+.idea/
+.vscode/
