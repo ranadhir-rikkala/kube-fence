@@ -195,4 +195,4 @@ More detail and the tradeoffs behind each choice: [docs/DESIGN.md](docs/DESIGN.m
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE).
