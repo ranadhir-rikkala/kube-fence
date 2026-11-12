@@ -282,3 +282,22 @@ func TestEvaluateFailsClosedWhenLedgerWriteFails(t *testing.T) {
 		t.Fatalf("decision = %+v, want denied and unrecorded", d)
 	}
 }
+
+func TestEvaluateConcurrentDuplicatesAllowOnlyOne(t *testing.T) {
+	e := NewEngine(testConfig(), ledger.NewMemory(time.Hour), func() time.Time { return t0 })
+	req := Request{Operation: OpDelete, User: agent, Resource: podGV, Namespace: "shop", Name: "db-0"}
+	const n = 50
+	results := make(chan bool, n)
+	for range n {
+		go func() { results <- e.Evaluate(req).Allowed }()
+	}
+	allowed := 0
+	for range n {
+		if <-results {
+			allowed++
+		}
+	}
+	if allowed != 1 {
+		t.Fatalf("allowed %d of %d concurrent duplicates, want 1", allowed, n)
+	}
+}
