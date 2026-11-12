@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-fence-config
+  namespace: kube-fence
+data:
+  config.yaml: |
+    mode: enforce
+    agents:
+      serviceAccounts: ["agents/*"]
+      users: []
+      groups: []
+    dedupe:
+      window: 10m
+    ownership:
+      overrideAnnotation: kube-fence.io/allow-ownership-override
+      protectedManagers:
+        - manager: kube-controller-manager
+          subresource: scale
+        - manager: argocd-controller
+        - manager: argocd-application-controller
+        - manager: kustomize-controller
+        - manager: helm-controller
+    limits:
+      default:
+        maxDeletes: 5
+        window: 10m
+        maxReplicaDelta: 5
+      namespaces:
+        demo:
+          maxDeletes: 3
+          maxReplicaDelta: 3
