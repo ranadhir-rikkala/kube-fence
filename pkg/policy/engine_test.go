@@ -127,13 +127,13 @@ func TestEvaluate(t *testing.T) {
 	update := func(u UserInfo, old, new map[string]any) Request {
 		return Request{Operation: OpUpdate, User: u, Resource: deployGV, Namespace: "shop", Name: "web", OldObject: old, Object: new}
 	}
-	jobCreate := func(intent string) Request {
+	jobCreate := func(intent, generatedName string) Request {
 		ann := "{}"
 		if intent != "" {
 			ann = `{"` + AnnotationIntentID + `": "` + intent + `"}`
 		}
-		return Request{Operation: OpCreate, User: agent, Resource: jobGV, Namespace: "shop",
-			Object: obj(t, `{"metadata": {"generateName": "migrate-", "annotations": `+ann+`}, "spec": {"template": {"spec": {"containers": [{"name": "m", "image": "migrate:v7"}]}}}}`)}
+		return Request{Operation: OpCreate, User: agent, Resource: jobGV, Namespace: "shop", Name: generatedName,
+			Object: obj(t, `{"metadata": {"name": "`+generatedName+`", "generateName": "migrate-", "annotations": `+ann+`}, "spec": {"template": {"spec": {"containers": [{"name": "m", "image": "migrate:v7"}]}}}}`)}
 	}
 	plain := deployment(t, `"managedFields": []`, 3, "app:v1", "")
 
@@ -168,16 +168,16 @@ func TestEvaluate(t *testing.T) {
 		{
 			name: "generateName creates are deduplicated by content",
 			steps: []step{
-				{name: "first job", req: jobCreate(""), allowed: true, recorded: true},
-				{name: "retried job", at: time.Minute, req: jobCreate(""), rules: []Rule{RuleDuplicate}},
+				{name: "first job", req: jobCreate("", "migrate-x7k2p"), allowed: true, recorded: true},
+				{name: "retried job gets a different random name", at: time.Minute, req: jobCreate("", "migrate-9qf4z"), rules: []Rule{RuleDuplicate}},
 			},
 		},
 		{
 			name: "explicit intent ids override content hashing",
 			steps: []step{
-				{name: "intent a", req: jobCreate("ticket-42"), allowed: true, recorded: true},
-				{name: "intent a again", req: jobCreate("ticket-42"), rules: []Rule{RuleDuplicate}, msgSubstr: "intent:ticket-42"},
-				{name: "intent b with same body", req: jobCreate("ticket-43"), allowed: true, recorded: true},
+				{name: "intent a", req: jobCreate("ticket-42", "migrate-aaaaa"), allowed: true, recorded: true},
+				{name: "intent a again", req: jobCreate("ticket-42", "migrate-bbbbb"), rules: []Rule{RuleDuplicate}, msgSubstr: "intent:ticket-42"},
+				{name: "intent b with same body", req: jobCreate("ticket-43", "migrate-ccccc"), allowed: true, recorded: true},
 			},
 		},
 		{
