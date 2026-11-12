@@ -38,6 +38,17 @@ expect_deny() {
   return 0
 }
 
+restart_fence() {
+  $K rollout restart deployment/kube-fence -n kube-fence >/dev/null
+  $K rollout status deployment/kube-fence -n kube-fence --timeout=120s >/dev/null
+  for _ in $(seq 1 60); do
+    $A create configmap kube-fence-probe -n demo --dry-run=server >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "webhook did not become reachable" >&2
+  return 1
+}
+
 wait_for_pod() {
   for _ in $(seq 1 60); do
     if [[ "$($K get pod "$1" -n demo -o jsonpath='{.metadata.uid}' 2>/dev/null)" != "${2:-}" ]] &&
@@ -53,6 +64,7 @@ wait_for_pod() {
 say "setup"
 $K delete namespace demo --ignore-not-found --wait=true >/dev/null
 $K apply -f "$ROOT/deploy/examples/agent-rbac.yaml" >/dev/null
+restart_fence
 
 argocd_sync() {
   cat <<EOF | $K apply --server-side --force-conflicts --field-manager=argocd-controller -f - >/dev/null
@@ -73,7 +85,8 @@ spec:
 EOF
 }
 argocd_sync
-$K patch deployment web -n demo --subresource=scale --type=merge -p '{"spec":{"replicas":2}}' \
+$K create deployment api -n demo --image=$PAUSE --replicas=1 >/dev/null
+$K patch deployment api -n demo --subresource=scale --type=merge -p '{"spec":{"replicas":2}}' \
   --field-manager=kube-controller-manager >/dev/null
 $K create deployment worker -n demo --image=$PAUSE --replicas=1 >/dev/null
 cat <<EOF | $K apply -f - >/dev/null
@@ -91,20 +104,24 @@ spec:
 EOF
 for cm in a b c; do $K create configmap "$cm" -n demo --from-literal=k=v >/dev/null; done
 wait_for_pod db-0
-echo "managers on deployment/web:"
-$K get deployment web -n demo -o jsonpath='{range .metadata.managedFields[*]}  {.manager} {.operation} {.subresource}{"\n"}{end}'
+for d in web api; do
+  echo "managers on deployment/$d:"
+  $K get deployment "$d" -n demo -o jsonpath='{range .metadata.managedFields[*]}  {.manager} {.operation} {.subresource}{"\n"}{end}'
+done
 
 say "ownership guard"
 expect_deny "agent sets spec.replicas owned by the HPA (scale subresource)" "owned by kube-controller-manager via /scale" \
-  $A patch deployment web -n demo --type=merge -p '{"spec":{"replicas":5}}'
+  $A patch deployment api -n demo --type=merge -p '{"spec":{"replicas":5}}'
 expect_deny "agent changes image applied by argocd-controller" "owned by argocd-controller" \
   $A set image deployment/web -n demo app=registry.k8s.io/pause:3.9
 expect_allow "same image change with an override set by this request" \
   $A patch deployment web -n demo --type=merge \
   -p '{"metadata":{"annotations":{"kube-fence.io/allow-ownership-override":"INC-1042"}},"spec":{"template":{"spec":{"containers":[{"name":"app","image":"registry.k8s.io/pause:3.9"}]}}}}'
 argocd_sync
-expect_deny "after an argocd re-sync, the stale override does not cover the next write" "owned by argocd-controller" \
+expect_deny "agent re-applies the same image after argocd reverted it" "duplicate irreversible effect" \
   $A set image deployment/web -n demo app=registry.k8s.io/pause:3.9
+expect_deny "stale override left on the object does not cover a new write" "\[field-ownership\]" \
+  $A set image deployment/web -n demo app=registry.k8s.io/pause:3.8
 echo "provenance annotation on deployment/web:"
 echo "  $($K get deployment web -n demo -o jsonpath='{.metadata.annotations.kube-fence\.io/last-agent-write}')"
 
@@ -130,6 +147,17 @@ expect_allow "agent creates generateName object with intent-id ticket-7" migrati
 expect_deny "retry with the same intent-id" "intent:ticket-7" migration ticket-7
 expect_allow "new intent-id with identical body" migration ticket-8
 
+backfill() {
+  $A create -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata: {generateName: backfill-run-, namespace: demo}
+data: {step: "backfill-orders"}
+EOF
+}
+expect_allow "agent creates generateName object without intent-id" backfill
+expect_deny "retry gets a new random name but the same content key" "duplicate irreversible effect" backfill
+
 say "blast radius"
 expect_deny "agent scales worker 1 -> 10 via /scale (cap 3)" "exceeds max delta 3" \
   $A scale deployment worker -n demo --replicas=10
@@ -143,8 +171,7 @@ expect_allow "agent repeats an absolute scale to 3 (no-op, allowed)" \
 
 say "audit mode"
 $K get configmap kube-fence-config -n kube-fence -o yaml | sed 's/mode: enforce/mode: audit/' | $K apply -f - >/dev/null
-$K rollout restart deployment/kube-fence -n kube-fence >/dev/null
-$K rollout status deployment/kube-fence -n kube-fence --timeout=120s >/dev/null
+restart_fence
 uid=$($K get pod db-0 -n demo -o jsonpath='{.metadata.uid}')
 expect_allow "audit: first delete" $A delete pod db-0 -n demo --wait=false
 wait_for_pod db-0 "$uid"
@@ -155,8 +182,7 @@ else
   FAIL=$((FAIL + 1)); printf 'FAIL  audit  duplicate delete\n      %s\n' "$out"
 fi
 $K get configmap kube-fence-config -n kube-fence -o yaml | sed 's/mode: audit/mode: enforce/' | $K apply -f - >/dev/null
-$K rollout restart deployment/kube-fence -n kube-fence >/dev/null
-$K rollout status deployment/kube-fence -n kube-fence --timeout=120s >/dev/null
+restart_fence
 
 say "result: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
